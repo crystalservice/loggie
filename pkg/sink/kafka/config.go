@@ -63,6 +63,8 @@ type Config struct {
 	RequiredAcks                  int             `yaml:"requiredAcks,omitempty"`
 	SASL                          SASL            `yaml:"sasl,omitempty"`
 	PartitionKey                  string          `yaml:"partitionKey,omitempty"`
+	MetadataTTL                   time.Duration   `yaml:"metadataTTL,omitempty" default:"15m"`
+	AllowAutoTopicCreation        bool            `yaml:"allowAutoTopicCreation,omitempty"`
 }
 
 type RenderTopicFail struct {

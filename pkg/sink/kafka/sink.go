@@ -104,9 +104,10 @@ func (s *Sink) Start() error {
 		WriteTimeout:           c.WriteTimeout,
 		RequiredAcks:           kafka.RequiredAcks(c.RequiredAcks),
 		Compression:            compression(c.Compression),
-		AllowAutoTopicCreation: true,
+		AllowAutoTopicCreation: c.AllowAutoTopicCreation,
 		Transport: &kafka.Transport{
-			SASL: mechanism,
+			SASL:        mechanism,
+			MetadataTTL: c.MetadataTTL,
 		},
 	}
 
