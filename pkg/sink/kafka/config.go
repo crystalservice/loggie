@@ -18,9 +18,8 @@ package kafka
 
 import (
 	"fmt"
-	"time"
-
 	"github.com/loggie-io/loggie/pkg/util/pattern"
+	"time"
 
 	"github.com/loggie-io/loggie/pkg/core/log"
 
