@@ -17,9 +17,13 @@ limitations under the License.
 package kafka
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
-	"github.com/loggie-io/loggie/pkg/util/pattern"
+	"os"
 	"time"
+
+	"github.com/loggie-io/loggie/pkg/util/pattern"
 
 	"github.com/loggie-io/loggie/pkg/core/log"
 
@@ -62,6 +66,7 @@ type Config struct {
 	WriteTimeout                  time.Duration   `yaml:"writeTimeout,omitempty"`
 	RequiredAcks                  int             `yaml:"requiredAcks,omitempty"`
 	SASL                          SASL            `yaml:"sasl,omitempty"`
+	TLS                           TLS             `yaml:"tls,omitempty"`
 	PartitionKey                  string          `yaml:"partitionKey,omitempty"`
 	MetadataTTL                   time.Duration   `yaml:"metadataTTL,omitempty" default:"15m"`
 	AllowAutoTopicCreation        bool            `yaml:"allowAutoTopicCreation,omitempty"`
@@ -79,6 +84,14 @@ type SASL struct {
 	Username  string `yaml:"username,omitempty"`
 	Password  string `yaml:"password,omitempty"`
 	Algorithm string `yaml:"algorithm,omitempty"`
+}
+
+type TLS struct {
+	Enabled            bool   `yaml:"enabled,omitempty"`
+	CaCertFile         string `yaml:"caCertFile,omitempty"`
+	ClientCertFile     string `yaml:"clientCertFile,omitempty"`
+	ClientKeyFile      string `yaml:"clientKeyFile,omitempty"`
+	InsecureSkipVerify bool   `yaml:"insecureSkipVerify,omitempty"`
 }
 
 func (c *Config) SetDefaults() {
@@ -116,6 +129,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.TLS.Validate(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -136,6 +153,50 @@ func (s *SASL) Validate() error {
 	}
 
 	return nil
+}
+
+func (t *TLS) Validate() error {
+	if !t.Enabled {
+		return nil
+	}
+
+	if (t.ClientCertFile == "") != (t.ClientKeyFile == "") {
+		return fmt.Errorf("kafka sink tls clientCertFile and clientKeyFile must both be set or both be empty")
+	}
+
+	return nil
+}
+
+func (t *TLS) tlsConfig() (*tls.Config, error) {
+	if !t.Enabled {
+		return nil, nil
+	}
+
+	cfg := &tls.Config{
+		InsecureSkipVerify: t.InsecureSkipVerify,
+	}
+
+	if t.CaCertFile != "" {
+		pemData, err := os.ReadFile(t.CaCertFile)
+		if err != nil {
+			return nil, fmt.Errorf("kafka sink tls read caCertFile: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemData) {
+			return nil, fmt.Errorf("kafka sink tls: no certificates in %s", t.CaCertFile)
+		}
+		cfg.RootCAs = pool
+	}
+
+	if t.ClientCertFile != "" && t.ClientKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(t.ClientCertFile, t.ClientKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("kafka sink tls load client certificate: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return cfg, nil
 }
 
 func balanceInstance(balance string) kafka.Balancer {

@@ -93,6 +93,12 @@ func (s *Sink) Start() error {
 		return err
 	}
 
+	tlsCfg, err := c.TLS.tlsConfig()
+	if err != nil {
+		log.Error("kafka sink tls config with error: %s", err.Error())
+		return err
+	}
+
 	w := &kafka.Writer{
 		Addr:                   kafka.TCP(c.Brokers...),
 		MaxAttempts:            c.MaxAttempts,
@@ -107,6 +113,7 @@ func (s *Sink) Start() error {
 		AllowAutoTopicCreation: c.AllowAutoTopicCreation,
 		Transport: &kafka.Transport{
 			SASL:        mechanism,
+			TLS:         tlsCfg,
 			MetadataTTL: c.MetadataTTL,
 		},
 	}
