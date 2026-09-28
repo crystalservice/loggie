@@ -1,51 +1,67 @@
----
-name: Kafka sink TLS
-overview: "Добавить в sink `kafka` опциональный TLS (то, что в Kafka называется SSL / SASL_SSL): шифрование соединения, свой CA и клиентский сертификат. HTTPS и source не трогаем."
-todos:
-  - id: config-tls
-    content: Добавить структуру TLS, валидацию и tlsConfig() в pkg/sink/kafka/config.go
-    status: completed
-  - id: wire-writer
-    content: Передать *tls.Config в kafka.Transport в pkg/sink/kafka/sink.go
-    status: completed
-isProject: false
----
-
 # TLS для sink kafka
 
-Kafka-брокер шифруется через TLS, а не HTTPS. Адрес в `brokers` остаётся `host:port`. Включение — поле `TLS` у `kafka.Transport` в [pkg/sink/kafka/sink.go](pkg/sink/kafka/sink.go). Сейчас туда попадают только SASL и `MetadataTTL`.
+Опциональный TLS для sink `type: kafka` (в терминах Kafka — SSL / SASL_SSL): шифрование соединения с брокером, свой CA и клиентский сертификат (mTLS).
 
-## Конфиг
+Адрес в `brokers` остаётся `host:port` — TLS включается только секцией `tls`, не схемой URL. SASL и TLS независимы: вместе это `SASL_SSL`, только TLS — `SSL`, с клиентским сертификатом — mTLS.
 
-В [pkg/sink/kafka/config.go](pkg/sink/kafka/config.go) добавить в `Config`:
+## Настройки `tls`
 
-```go
-TLS TLS `yaml:"tls,omitempty"`
-```
+| Поле | Тип | По умолчанию | Описание |
+|------|-----|--------------|----------|
+| `enabled` | bool | `false` | Включить TLS. При `false` остальные поля игнорируются, соединение без шифрования. |
+| `caCertFile` | string | — | Путь к PEM-файлу CA для проверки сертификата брокера. Если пусто — используются системные корневые CA. |
+| `clientCertFile` | string | — | Путь к клиентскому сертификату (PEM) для mTLS. Задаётся только вместе с `clientKeyFile`. |
+| `clientKeyFile` | string | — | Путь к приватному ключу клиента (PEM). Задаётся только вместе с `clientCertFile`. |
+| `insecureSkipVerify` | bool | `false` | Не проверять сертификат брокера. Только для отладки — в проде не использовать. |
 
-```go
-type TLS struct {
-    Enabled            bool   `yaml:"enabled,omitempty"`
-    CaCertFile         string `yaml:"caCertFile,omitempty"`
-    ClientCertFile     string `yaml:"clientCertFile,omitempty"`
-    ClientKeyFile      string `yaml:"clientKeyFile,omitempty"`
-    InsecureSkipVerify bool   `yaml:"insecureSkipVerify,omitempty"`
-}
-```
+### Валидация
 
-В `Validate()`: если задан один из `clientCertFile` / `clientKeyFile`, обязательны оба. При `enabled: false` остальные поля не проверять.
+- При `enabled: false` остальные поля не проверяются.
+- Если задан один из `clientCertFile` / `clientKeyFile`, обязательны оба.
+- Ошибка чтения или разбора сертификатов при старте sink — ошибка запуска.
 
-Метод `tlsConfig() (*tls.Config, error)`:
+## Как работает проверка
 
-- `enabled: false` — вернуть `nil, nil` (соединение без TLS, как сейчас).
-- Иначе собрать `*tls.Config`: `InsecureSkipVerify`, при непустом `caCertFile` — PEM в `RootCAs`, при паре cert/key — `tls.LoadX509KeyPair` в `Certificates`.
-- Пустой CA не читать с диска (в отличие от `franz.NewTLSConfig`, который падает на пустой строке).
+В TLS две независимые стороны проверки:
 
-## Подключение в writer
+1. **Клиент → брокер** — Loggie проверяет сертификат Kafka (`caCertFile` / системные CA, либо отключение через `insecureSkipVerify`).
+2. **Брокер → клиент** — Kafka проверяет сертификат Loggie (**mTLS**: `clientCertFile` + `clientKeyFile`). Это предъявление своего сертификата брокеру, а не проверка CA клиентом.
 
-В `Start()` до создания `kafka.Writer` вызвать `c.TLS.tlsConfig()` и передать результат в `Transport.TLS` рядом с существующим `SASL`. `Addr: kafka.TCP(...)` не менять: TLS включается только конфигом транспорта. Ошибка загрузки сертификатов — ошибка старта sink.
+При `enabled: true` канал всегда шифруется. `insecureSkipVerify` и отсутствие клиентского сертификата влияют только на проверку личности, не на шифрование.
 
-Пример:
+### `caCertFile`
+
+| Значение | Поведение |
+|----------|-----------|
+| задан | Сертификат брокера проверяется по этому CA (если `insecureSkipVerify: false`). |
+| пустой | Используются системные корневые CA. |
+| + `insecureSkipVerify: true` | CA не используется для решения «доверять / нет» — проверка пропускается. |
+
+`caCertFile` не заменяет клиентский сертификат и не включает mTLS.
+
+### `clientCertFile` + `clientKeyFile`
+
+| Значение | Поведение |
+|----------|-----------|
+| оба заданы | Loggie предъявляет клиентский сертификат в handshake. Если брокер настроен на mTLS — ок; если нет — обычно игнорирует. |
+| оба пустые | Клиентский cert не отправляется. Если брокер требует mTLS — соединение упадёт. |
+| задан только один | Ошибка валидации при старте. |
+
+Эти поля не участвуют в проверке сертификата брокера — только в аутентификации клиента.
+
+### Типичные комбинации
+
+| Конфиг | Что происходит |
+|--------|----------------|
+| только `enabled: true` | Шифрование; брокер проверяется по системным CA. |
+| + `caCertFile` | Шифрование; брокер проверяется по указанному CA. |
+| + `insecureSkipVerify: true` | Шифрование; личность брокера не проверяется. |
+| + `clientCertFile` / `clientKeyFile` | То же + mTLS (если брокер это требует или принимает). |
+| CA + client cert/key, `insecureSkipVerify: false` | Полный прод-вариант: шифрование + доверие к брокеру + клиентский сертификат. |
+
+Кратко: `caCertFile` — «кому я доверяю как брокеру»; `clientCertFile` / `clientKeyFile` — «вот кто я для брокера»; `insecureSkipVerify` — «не проверяй брокера» (перебивает смысл CA).
+
+## Пример
 
 ```yaml
 sink:
@@ -60,8 +76,19 @@ sink:
   tls:
     enabled: true
     caCertFile: /etc/loggie/certs/ca.pem
+    clientCertFile: /etc/loggie/certs/client.crt
+    clientKeyFile: /etc/loggie/certs/client.key
+    insecureSkipVerify: false
 ```
 
-SASL и TLS независимы: вместе это `SASL_SSL`, только TLS — `SSL`, клиентский сертификат — mTLS.
+Минимальный вариант (только шифрование с проверкой по своему CA, без mTLS и без SASL):
 
-Source `type: kafka` не менять.
+```yaml
+sink:
+  type: kafka
+  brokers: ["kafka.example.com:9093"]
+  topic: loggie
+  tls:
+    enabled: true
+    caCertFile: /etc/loggie/certs/ca.pem
+```
